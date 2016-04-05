@@ -1,0 +1,19 @@
+# globals
+debug = true
+
+[logging]
+json = false
+
+[rules]
+
+[rules.001]
+match = "amazonaws.com$"
+action = "allow"
+
+[rules.002]
+match = "^github.com$"
+action = "allow"
+
+[rules.003]
+match = "*"
+action = "deny"
