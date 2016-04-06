@@ -2,6 +2,8 @@
 
 This is service is designed to transparently proxy HTTPS traffic traversing a NAT host. It currently uses the SNI in the ClientHello msg of TLS request to proxy a connection to it's destination.
 
+Further reading on this idea is [squid-cache SSL Peek and Splice](http://wiki.squid-cache.org/Features/SslPeekAndSplice).
+
 # Background
 
 Check out my presentation [Build a proxy with Go](https://speakerdeck.com/wolfeidau/building-a-proxy-in-go) which I presented at the golang meetup in Melbourne, AU.
