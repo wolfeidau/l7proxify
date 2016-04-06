@@ -15,5 +15,5 @@ match = "^github.com$"
 action = "allow"
 
 [rules.003]
-match = "*"
+match = ".*"
 action = "deny"
