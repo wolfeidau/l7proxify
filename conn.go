@@ -13,9 +13,11 @@ import (
 type Conn struct {
 	*net.TCPConn
 
-	Log      log.Interface
+	Log log.Interface
+
+	RawInput *block
 	hand     bytes.Buffer // handshake data waiting to be read
-	RawInput *block       // raw input, right off the wire
+
 }
 
 // NewConn new l7proxify connection
@@ -26,14 +28,17 @@ func NewConn(conn *net.TCPConn) *Conn {
 	}
 }
 
-func (c *Conn) readHandshake() (interface{}, error) {
+func (c *Conn) peakHandshake() (interface{}, error) {
 	for c.hand.Len() < 4 {
-		if err := c.readRecord(recordTypeHandshake); err != nil {
+		if err := c.peakRecord(recordTypeHandshake); err != nil {
 			return nil, err
 		}
 	}
 
 	data := c.hand.Bytes()
+
+	c.Log.WithField("data", fmt.Sprintf("%x", data)).Debug("handshake")
+
 	n := int(data[1])<<16 | int(data[2])<<8 | int(data[3])
 	if n > maxHandshake {
 		return nil, fmt.Errorf("tls: oversized handshake with length %d", n)
@@ -44,6 +49,10 @@ func (c *Conn) readHandshake() (interface{}, error) {
 	switch data[0] {
 	case typeClientHello:
 		m = new(clientHelloMsg)
+	case typeServerHello:
+		m = new(serverHelloMsg)
+	case typeCertificate:
+		m = new(certificateMsg)
 	default:
 		return nil, fmt.Errorf("unexpected message type %d", data[0])
 	}
@@ -59,9 +68,11 @@ func (c *Conn) readHandshake() (interface{}, error) {
 	return m, nil
 }
 
-func (c *Conn) readRecord(want recordType) error {
+func (c *Conn) peakRecord(want recordType) error {
 
-	var err error
+	var (
+		err error
+	)
 
 	if c.RawInput == nil {
 		c.RawInput = newBlock()
@@ -72,6 +83,8 @@ func (c *Conn) readRecord(want recordType) error {
 		c.Log.WithError(err).Error("header peek failed")
 		return err
 	}
+
+	c.Log.WithField("data", fmt.Sprintf("%x", b.data)).Debug("header")
 
 	typ := recordType(b.data[0])
 
@@ -96,15 +109,13 @@ func (c *Conn) readRecord(want recordType) error {
 		"n":    n,
 	}).Info("record")
 
-	if err = b.readFromUntil(c, recordHeaderLen+n); err != nil {
+	if err = b.readFromUntil(c, n); err != nil {
 		if err == io.EOF {
 			err = io.ErrUnexpectedEOF
 		}
 		c.Log.WithError(err).Error("record peek failed")
 		return err
 	}
-
-	data := b.data[recordHeaderLen:]
 
 	switch typ {
 	default:
@@ -113,7 +124,7 @@ func (c *Conn) readRecord(want recordType) error {
 		if typ != want {
 			return fmt.Errorf("tls: wanted record type %d got %d", want, typ)
 		}
-		c.hand.Write(data)
+		c.hand.Write(b.data[recordHeaderLen:])
 	}
 
 	return nil

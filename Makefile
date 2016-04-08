@@ -4,6 +4,9 @@ VERSION=1.0.0
 GO15VENDOREXPERIMENT := 1
 ITERATION := 1
 
+build-linux:
+	mkdir -p build/Linux  && GOOS=linux  go build -ldflags "-X main.Version=$(VERSION)" -o build/Linux/$(NAME) ./cmd/$(NAME)
+
 build:
 	rm -rf build && mkdir build
 	mkdir -p build/Linux  && GOOS=linux  go build -ldflags "-X main.Version=$(VERSION)" -o build/Linux/$(NAME) ./cmd/$(NAME)
@@ -45,4 +48,4 @@ packages:
 	cp build/Linux/unicreds stage/usr/bin
 	fpm --name $(NAME) -a x86_64 -t rpm -s dir --version $(VERSION) --iteration $(ITERATION) -C stage -p package/$(NAME)-$(VERSION)_$(ITERATION).rpm usr
 
-.PHONY: build fmt test watch release packages
+.PHONY: build fmt test watch release packages build-linux

@@ -55,13 +55,13 @@ func (s *Session) Start() {
 
 	// START SSL Handshake Reading
 
-	msg, err := s.lconn.readHandshake()
+	lmsg, err := s.lconn.peakHandshake()
 	if err != nil {
 		s.Log.WithError(err).Error("read handshake failed")
 		return
 	}
 
-	clientHello, ok := msg.(*clientHelloMsg)
+	clientHello, ok := lmsg.(*clientHelloMsg)
 
 	if !ok {
 		s.Log.Errorf("clientHello expected")
@@ -118,6 +118,49 @@ func (s *Session) Start() {
 		s.Log.Errorf("Write failed '%s'\n", err)
 		return
 	}
+
+	smsg, err := s.rconn.peakHandshake()
+	if err != nil {
+		s.Log.WithError(err).Error("read handshake failed")
+		return
+	}
+
+	serverHello, ok := smsg.(*serverHelloMsg)
+
+	if !ok {
+		s.Log.Errorf("serverHello expected")
+		return
+	}
+
+	_, err = s.lconn.Write(s.rconn.RawInput.data)
+	if err != nil {
+		s.Log.Errorf("Write failed '%s'\n", err)
+		return
+	}
+
+	s.Log.Debugf("serverHello ocspStapling '%v'\n", serverHello.ocspStapling)
+
+	//
+	// cmsg, err := s.rconn.readHandshake()
+	// if err != nil {
+	// 	s.Log.WithError(err).Error("read handshake failed")
+	// 	return
+	// }
+	//
+	// certificate, ok := cmsg.(*certificateMsg)
+	//
+	// if !ok {
+	// 	s.Log.Errorf("certificate expected")
+	// 	return
+	// }
+	//
+	// _, err = s.lconn.Write(s.rconn.RawInput.data)
+	// if err != nil {
+	// 	s.Log.Errorf("Write failed '%s'\n", err)
+	// 	return
+	// }
+	//
+	// s.Log.Debugf("certificates count '%v'\n", len(certificate.certificates))
 
 	s.wait.Add(2)
 
