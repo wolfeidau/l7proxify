@@ -5,7 +5,8 @@ package l7proxify
 // license which can be found in the LICENSE file.
 
 import (
-	"bytes"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"net"
@@ -18,12 +19,12 @@ import (
 type Session struct {
 	fromBytes, toBytes int64
 	laddr, raddr       net.Addr
-	lconn, rconn       *net.TCPConn
+	lconn, rconn       *Conn
 	Log                log.Interface
 
-	hand     bytes.Buffer // handshake data waiting to be read
-	rawInput *block       // raw input, right off the wire
-
+	// hand     bytes.Buffer // handshake data waiting to be read
+	// rawInput *block       // raw input, right off the wire
+	//
 	wait sync.WaitGroup
 }
 
@@ -31,8 +32,8 @@ type Session struct {
 func NewSession(lconn *net.TCPConn) *Session {
 	return &Session{
 		laddr: lconn.LocalAddr(),
-		lconn: lconn,
-		Log:   log.WithField("conn", lconn.RemoteAddr().String()),
+		lconn: NewConn(lconn),
+		Log:   log.WithField("sessionID", generateID()),
 	}
 }
 
@@ -54,13 +55,13 @@ func (s *Session) Start() {
 
 	// START SSL Handshake Reading
 
-	msg, err := s.readHandshake()
+	lmsg, err := s.lconn.peakHandshake()
 	if err != nil {
 		s.Log.WithError(err).Error("read handshake failed")
 		return
 	}
 
-	clientHello, ok := msg.(*clientHelloMsg)
+	clientHello, ok := lmsg.(*clientHelloMsg)
 
 	if !ok {
 		s.Log.Errorf("clientHello expected")
@@ -102,18 +103,64 @@ func (s *Session) Start() {
 		return
 	}
 
-	s.rconn, err = net.DialTCP("tcp", nil, raddr)
+	c, err := net.DialTCP("tcp", nil, raddr)
 	if err != nil {
 		s.Log.WithError(err).Error("remote connection")
 		return
 	}
+
+	s.rconn = NewConn(c)
+
 	defer s.rconn.Close()
 
-	_, err = s.rconn.Write(s.rawInput.data)
+	_, err = s.rconn.Write(s.lconn.RawInput.data)
 	if err != nil {
 		s.Log.Errorf("Write failed '%s'\n", err)
 		return
 	}
+
+	smsg, err := s.rconn.peakHandshake()
+	if err != nil {
+		s.Log.WithError(err).Error("read handshake failed")
+		return
+	}
+
+	serverHello, ok := smsg.(*serverHelloMsg)
+
+	if !ok {
+		s.Log.Errorf("serverHello expected")
+		return
+	}
+
+	_, err = s.lconn.Write(s.rconn.RawInput.data)
+	if err != nil {
+		s.Log.Errorf("Write failed '%s'\n", err)
+		return
+	}
+
+	s.Log.Debugf("serverHello ocspStapling '%v'\n", serverHello.ocspStapling)
+
+	//
+	// cmsg, err := s.rconn.readHandshake()
+	// if err != nil {
+	// 	s.Log.WithError(err).Error("read handshake failed")
+	// 	return
+	// }
+	//
+	// certificate, ok := cmsg.(*certificateMsg)
+	//
+	// if !ok {
+	// 	s.Log.Errorf("certificate expected")
+	// 	return
+	// }
+	//
+	// _, err = s.lconn.Write(s.rconn.RawInput.data)
+	// if err != nil {
+	// 	s.Log.Errorf("Write failed '%s'\n", err)
+	// 	return
+	// }
+	//
+	// s.Log.Debugf("certificates count '%v'\n", len(certificate.certificates))
 
 	s.wait.Add(2)
 
@@ -129,106 +176,13 @@ func (s *Session) Start() {
 
 }
 
-func (s *Session) pipe(to, from *net.TCPConn, bytesCopied *int64) {
+func (s *Session) pipe(to, from net.Conn, bytesCopied *int64) {
 	var err error
 	defer s.wait.Done()
 	*bytesCopied, err = io.Copy(to, from)
 	if err != nil {
 		s.Log.WithError(err).Error("pipe failed")
 	}
-}
-
-func (s *Session) readHandshake() (interface{}, error) {
-	for s.hand.Len() < 4 {
-		if err := s.readRecord(recordTypeHandshake); err != nil {
-			return nil, err
-		}
-	}
-
-	data := s.hand.Bytes()
-	n := int(data[1])<<16 | int(data[2])<<8 | int(data[3])
-	if n > maxHandshake {
-		return nil, fmt.Errorf("tls: oversized handshake with length %d", n)
-	}
-
-	data = s.hand.Next(4 + n)
-	var m handshakeMessage
-	switch data[0] {
-	case typeClientHello:
-		m = new(clientHelloMsg)
-	default:
-		return nil, fmt.Errorf("unexpected message type %d", data[0])
-	}
-
-	data = append([]byte(nil), data...)
-
-	if !m.unmarshal(data) {
-		return nil, fmt.Errorf("unexpected message type %d", data[0])
-	}
-
-	//s.Log.Infof("msg unmarshalled: %+v", m)
-
-	return m, nil
-}
-
-func (s *Session) readRecord(want recordType) error {
-
-	var err error
-
-	if s.rawInput == nil {
-		s.rawInput = newBlock()
-	}
-	b := s.rawInput
-
-	if err = b.readFromUntil(s.lconn, recordHeaderLen); err != nil {
-		s.Log.WithError(err).Error("header peek failed")
-		return err
-	}
-
-	typ := recordType(b.data[0])
-
-	// No valid TLS record has a type of 0x80, however SSLv2 handshakes
-	// start with a uint16 length where the MSB is set and the first record
-	// is always < 256 bytes long. Therefore typ == 0x80 strongly suggests
-	// an SSLv2 client.
-	if want == recordTypeHandshake && typ == 0x80 {
-		return fmt.Errorf("tls: unsupported SSLv2 handshake received")
-	}
-
-	vers := uint16(b.data[1])<<8 | uint16(b.data[2])
-	n := int(b.data[3])<<8 | int(b.data[4])
-
-	if n > maxCiphertext {
-		return fmt.Errorf("tls: oversized record received with length %d", n)
-	}
-
-	s.Log.WithFields(log.Fields{
-		"typ":  typ,
-		"vers": vers,
-		"n":    n,
-	}).Info("record")
-
-	if err = b.readFromUntil(s.lconn, recordHeaderLen+n); err != nil {
-		if err == io.EOF {
-			err = io.ErrUnexpectedEOF
-		}
-		s.Log.WithError(err).Error("record peek failed")
-		return err
-	}
-
-	data := b.data[recordHeaderLen:]
-
-	switch typ {
-	default:
-		return fmt.Errorf("tls: unexpected record type")
-	case recordTypeHandshake:
-		if typ != want {
-			return fmt.Errorf("tls: wanted record type %d got %d", want, typ)
-		}
-		s.hand.Write(data)
-	}
-
-	return nil
 }
 
 // TLSHandler pulls apart and proxies TLS connections using the client hello
@@ -240,4 +194,14 @@ type TLSHandler struct {
 func (tlsh *TLSHandler) ProxyConnection(cin *net.TCPConn) {
 	s := NewSession(cin)
 	go s.Start()
+}
+
+func generateID() string {
+	r := make([]byte, 10)
+	_, err := rand.Read(r)
+	if err != nil {
+		return ""
+	}
+
+	return hex.EncodeToString(r)
 }

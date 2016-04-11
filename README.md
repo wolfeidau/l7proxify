@@ -1,6 +1,6 @@
 # l7proxyify
 
-This is service is designed to transparently proxy HTTPS traffic traversing a NAT host. It currently uses the SNI in the ClientHello msg of TLS request to proxy a connection to it's destination.
+l7proxyify is designed to transparently proxy TLS traffic traversing a NAT host. It uses the Server Name Indicator attribute (SNI) in the ClientHello msg of TLS request to proxy a connection to it's destination.
 
 Further reading on this idea is [squid-cache SSL Peek and Splice](http://wiki.squid-cache.org/Features/SslPeekAndSplice).
 
@@ -41,7 +41,7 @@ match = "^github.com$"
 action = "allow"
 
 [rules.003]
-match = "*"
+match = ".*"
 action = "deny"
 ```
 
@@ -51,6 +51,10 @@ action = "deny"
 * Enhance the rules with more options around which attributes to look at
 * Add tracing for auditing
 * Add metrics and health check endpoint
+
+# References
+
+* [Traffic Analysis of an SSL/TLS Session](http://blog.fourthbit.com/2014/12/23/traffic-analysis-of-an-ssl-slash-tls-session)
 
 # Disclaimer
 

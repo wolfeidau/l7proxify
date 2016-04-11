@@ -487,6 +487,414 @@ func (m *clientHelloMsg) unmarshal(data []byte) bool {
 	return true
 }
 
+type serverHelloMsg struct {
+	raw                 []byte
+	vers                uint16
+	random              []byte
+	sessionId           []byte
+	cipherSuite         uint16
+	compressionMethod   uint8
+	nextProtoNeg        bool
+	nextProtos          []string
+	ocspStapling        bool
+	scts                [][]byte
+	ticketSupported     bool
+	secureRenegotiation bool
+	alpnProtocol        string
+}
+
+func (m *serverHelloMsg) equal(i interface{}) bool {
+	m1, ok := i.(*serverHelloMsg)
+	if !ok {
+		return false
+	}
+
+	if len(m.scts) != len(m1.scts) {
+		return false
+	}
+	for i, sct := range m.scts {
+		if !bytes.Equal(sct, m1.scts[i]) {
+			return false
+		}
+	}
+
+	return bytes.Equal(m.raw, m1.raw) &&
+		m.vers == m1.vers &&
+		bytes.Equal(m.random, m1.random) &&
+		bytes.Equal(m.sessionId, m1.sessionId) &&
+		m.cipherSuite == m1.cipherSuite &&
+		m.compressionMethod == m1.compressionMethod &&
+		m.nextProtoNeg == m1.nextProtoNeg &&
+		eqStrings(m.nextProtos, m1.nextProtos) &&
+		m.ocspStapling == m1.ocspStapling &&
+		m.ticketSupported == m1.ticketSupported &&
+		m.secureRenegotiation == m1.secureRenegotiation &&
+		m.alpnProtocol == m1.alpnProtocol
+}
+
+func (m *serverHelloMsg) marshal() []byte {
+	if m.raw != nil {
+		return m.raw
+	}
+
+	length := 38 + len(m.sessionId)
+	numExtensions := 0
+	extensionsLength := 0
+
+	nextProtoLen := 0
+	if m.nextProtoNeg {
+		numExtensions++
+		for _, v := range m.nextProtos {
+			nextProtoLen += len(v)
+		}
+		nextProtoLen += len(m.nextProtos)
+		extensionsLength += nextProtoLen
+	}
+	if m.ocspStapling {
+		numExtensions++
+	}
+	if m.ticketSupported {
+		numExtensions++
+	}
+	if m.secureRenegotiation {
+		extensionsLength += 1
+		numExtensions++
+	}
+	if alpnLen := len(m.alpnProtocol); alpnLen > 0 {
+		if alpnLen >= 256 {
+			panic("invalid ALPN protocol")
+		}
+		extensionsLength += 2 + 1 + alpnLen
+		numExtensions++
+	}
+	sctLen := 0
+	if len(m.scts) > 0 {
+		for _, sct := range m.scts {
+			sctLen += len(sct) + 2
+		}
+		extensionsLength += 2 + sctLen
+		numExtensions++
+	}
+
+	if numExtensions > 0 {
+		extensionsLength += 4 * numExtensions
+		length += 2 + extensionsLength
+	}
+
+	x := make([]byte, 4+length)
+	x[0] = typeServerHello
+	x[1] = uint8(length >> 16)
+	x[2] = uint8(length >> 8)
+	x[3] = uint8(length)
+	x[4] = uint8(m.vers >> 8)
+	x[5] = uint8(m.vers)
+	copy(x[6:38], m.random)
+	x[38] = uint8(len(m.sessionId))
+	copy(x[39:39+len(m.sessionId)], m.sessionId)
+	z := x[39+len(m.sessionId):]
+	z[0] = uint8(m.cipherSuite >> 8)
+	z[1] = uint8(m.cipherSuite)
+	z[2] = uint8(m.compressionMethod)
+
+	z = z[3:]
+	if numExtensions > 0 {
+		z[0] = byte(extensionsLength >> 8)
+		z[1] = byte(extensionsLength)
+		z = z[2:]
+	}
+	if m.nextProtoNeg {
+		z[0] = byte(extensionNextProtoNeg >> 8)
+		z[1] = byte(extensionNextProtoNeg & 0xff)
+		z[2] = byte(nextProtoLen >> 8)
+		z[3] = byte(nextProtoLen)
+		z = z[4:]
+
+		for _, v := range m.nextProtos {
+			l := len(v)
+			if l > 255 {
+				l = 255
+			}
+			z[0] = byte(l)
+			copy(z[1:], []byte(v[0:l]))
+			z = z[1+l:]
+		}
+	}
+	if m.ocspStapling {
+		z[0] = byte(extensionStatusRequest >> 8)
+		z[1] = byte(extensionStatusRequest)
+		z = z[4:]
+	}
+	if m.ticketSupported {
+		z[0] = byte(extensionSessionTicket >> 8)
+		z[1] = byte(extensionSessionTicket)
+		z = z[4:]
+	}
+	if m.secureRenegotiation {
+		z[0] = byte(extensionRenegotiationInfo >> 8)
+		z[1] = byte(extensionRenegotiationInfo & 0xff)
+		z[2] = 0
+		z[3] = 1
+		z = z[5:]
+	}
+	if alpnLen := len(m.alpnProtocol); alpnLen > 0 {
+		z[0] = byte(extensionALPN >> 8)
+		z[1] = byte(extensionALPN & 0xff)
+		l := 2 + 1 + alpnLen
+		z[2] = byte(l >> 8)
+		z[3] = byte(l)
+		l -= 2
+		z[4] = byte(l >> 8)
+		z[5] = byte(l)
+		l -= 1
+		z[6] = byte(l)
+		copy(z[7:], []byte(m.alpnProtocol))
+		z = z[7+alpnLen:]
+	}
+	if sctLen > 0 {
+		z[0] = byte(extensionSCT >> 8)
+		z[1] = byte(extensionSCT)
+		l := sctLen + 2
+		z[2] = byte(l >> 8)
+		z[3] = byte(l)
+		z[4] = byte(sctLen >> 8)
+		z[5] = byte(sctLen)
+
+		z = z[6:]
+		for _, sct := range m.scts {
+			z[0] = byte(len(sct) >> 8)
+			z[1] = byte(len(sct))
+			copy(z[2:], sct)
+			z = z[len(sct)+2:]
+		}
+	}
+
+	m.raw = x
+
+	return x
+}
+
+func (m *serverHelloMsg) unmarshal(data []byte) bool {
+	if len(data) < 42 {
+		return false
+	}
+	m.raw = data
+	m.vers = uint16(data[4])<<8 | uint16(data[5])
+	m.random = data[6:38]
+	sessionIdLen := int(data[38])
+	if sessionIdLen > 32 || len(data) < 39+sessionIdLen {
+		return false
+	}
+	m.sessionId = data[39 : 39+sessionIdLen]
+	data = data[39+sessionIdLen:]
+	if len(data) < 3 {
+		return false
+	}
+	m.cipherSuite = uint16(data[0])<<8 | uint16(data[1])
+	m.compressionMethod = data[2]
+	data = data[3:]
+
+	m.nextProtoNeg = false
+	m.nextProtos = nil
+	m.ocspStapling = false
+	m.scts = nil
+	m.ticketSupported = false
+	m.alpnProtocol = ""
+
+	if len(data) == 0 {
+		// ServerHello is optionally followed by extension data
+		return true
+	}
+	if len(data) < 2 {
+		return false
+	}
+
+	extensionsLength := int(data[0])<<8 | int(data[1])
+	data = data[2:]
+	if len(data) != extensionsLength {
+		return false
+	}
+
+	for len(data) != 0 {
+		if len(data) < 4 {
+			return false
+		}
+		extension := uint16(data[0])<<8 | uint16(data[1])
+		length := int(data[2])<<8 | int(data[3])
+		data = data[4:]
+		if len(data) < length {
+			return false
+		}
+
+		switch extension {
+		case extensionNextProtoNeg:
+			m.nextProtoNeg = true
+			d := data[:length]
+			for len(d) > 0 {
+				l := int(d[0])
+				d = d[1:]
+				if l == 0 || l > len(d) {
+					return false
+				}
+				m.nextProtos = append(m.nextProtos, string(d[:l]))
+				d = d[l:]
+			}
+		case extensionStatusRequest:
+			if length > 0 {
+				return false
+			}
+			m.ocspStapling = true
+		case extensionSessionTicket:
+			if length > 0 {
+				return false
+			}
+			m.ticketSupported = true
+		case extensionRenegotiationInfo:
+			if length != 1 || data[0] != 0 {
+				return false
+			}
+			m.secureRenegotiation = true
+		case extensionALPN:
+			d := data[:length]
+			if len(d) < 3 {
+				return false
+			}
+			l := int(d[0])<<8 | int(d[1])
+			if l != len(d)-2 {
+				return false
+			}
+			d = d[2:]
+			l = int(d[0])
+			if l != len(d)-1 {
+				return false
+			}
+			d = d[1:]
+			if len(d) == 0 {
+				// ALPN protocols must not be empty.
+				return false
+			}
+			m.alpnProtocol = string(d)
+		case extensionSCT:
+			d := data[:length]
+
+			if len(d) < 2 {
+				return false
+			}
+			l := int(d[0])<<8 | int(d[1])
+			d = d[2:]
+			if len(d) != l {
+				return false
+			}
+			if l == 0 {
+				continue
+			}
+
+			m.scts = make([][]byte, 0, 3)
+			for len(d) != 0 {
+				if len(d) < 2 {
+					return false
+				}
+				sctLen := int(d[0])<<8 | int(d[1])
+				d = d[2:]
+				if len(d) < sctLen {
+					return false
+				}
+				m.scts = append(m.scts, d[:sctLen])
+				d = d[sctLen:]
+			}
+		}
+		data = data[length:]
+	}
+
+	return true
+}
+
+type certificateMsg struct {
+	raw          []byte
+	certificates [][]byte
+}
+
+func (m *certificateMsg) equal(i interface{}) bool {
+	m1, ok := i.(*certificateMsg)
+	if !ok {
+		return false
+	}
+
+	return bytes.Equal(m.raw, m1.raw) &&
+		eqByteSlices(m.certificates, m1.certificates)
+}
+
+func (m *certificateMsg) marshal() (x []byte) {
+	if m.raw != nil {
+		return m.raw
+	}
+
+	var i int
+	for _, slice := range m.certificates {
+		i += len(slice)
+	}
+
+	length := 3 + 3*len(m.certificates) + i
+	x = make([]byte, 4+length)
+	x[0] = typeCertificate
+	x[1] = uint8(length >> 16)
+	x[2] = uint8(length >> 8)
+	x[3] = uint8(length)
+
+	certificateOctets := length - 3
+	x[4] = uint8(certificateOctets >> 16)
+	x[5] = uint8(certificateOctets >> 8)
+	x[6] = uint8(certificateOctets)
+
+	y := x[7:]
+	for _, slice := range m.certificates {
+		y[0] = uint8(len(slice) >> 16)
+		y[1] = uint8(len(slice) >> 8)
+		y[2] = uint8(len(slice))
+		copy(y[3:], slice)
+		y = y[3+len(slice):]
+	}
+
+	m.raw = x
+	return
+}
+
+func (m *certificateMsg) unmarshal(data []byte) bool {
+	if len(data) < 7 {
+		return false
+	}
+
+	m.raw = data
+	certsLen := uint32(data[4])<<16 | uint32(data[5])<<8 | uint32(data[6])
+	if uint32(len(data)) != certsLen+7 {
+		return false
+	}
+
+	numCerts := 0
+	d := data[7:]
+	for certsLen > 0 {
+		if len(d) < 4 {
+			return false
+		}
+		certLen := uint32(d[0])<<16 | uint32(d[1])<<8 | uint32(d[2])
+		if uint32(len(d)) < 3+certLen {
+			return false
+		}
+		d = d[3+certLen:]
+		certsLen -= 3 + certLen
+		numCerts++
+	}
+
+	m.certificates = make([][]byte, numCerts)
+	d = data[7:]
+	for i := 0; i < numCerts; i++ {
+		certLen := uint32(d[0])<<16 | uint32(d[1])<<8 | uint32(d[2])
+		m.certificates[i] = d[3 : 3+certLen]
+		d = d[3+certLen:]
+	}
+
+	return true
+}
+
 func eqUint16s(x, y []uint16) bool {
 	if len(x) != len(y) {
 		return false
@@ -517,6 +925,18 @@ func eqStrings(x, y []string) bool {
 	}
 	for i, v := range x {
 		if y[i] != v {
+			return false
+		}
+	}
+	return true
+}
+
+func eqByteSlices(x, y [][]byte) bool {
+	if len(x) != len(y) {
+		return false
+	}
+	for i, v := range x {
+		if !bytes.Equal(v, y[i]) {
 			return false
 		}
 	}
