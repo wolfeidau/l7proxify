@@ -5,6 +5,7 @@ package l7proxify
 // license which can be found in the LICENSE file.
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
@@ -22,9 +23,6 @@ type Session struct {
 	lconn, rconn       *Conn
 	Log                log.Interface
 
-	// hand     bytes.Buffer // handshake data waiting to be read
-	// rawInput *block       // raw input, right off the wire
-	//
 	wait sync.WaitGroup
 }
 
@@ -47,13 +45,13 @@ func NewSession(lconn *net.TCPConn) *Session {
 //
 func (s *Session) Start() {
 
-	var err error
+	var (
+		err error
+	)
 
 	defer s.lconn.Close()
 
 	s.Log.Info("Starting session")
-
-	// START SSL Handshake Reading
 
 	lmsg, err := s.lconn.peakHandshake()
 	if err != nil {
@@ -67,6 +65,8 @@ func (s *Session) Start() {
 		s.Log.Errorf("clientHello expected")
 		return
 	}
+
+	s.Log.Debugf("clientHello sessionID'%+v'\n", clientHello.sessionID)
 
 	if clientHello.serverName == "" {
 		s.Log.Errorf("clientHello missing serverName")
@@ -113,11 +113,13 @@ func (s *Session) Start() {
 
 	defer s.rconn.Close()
 
-	_, err = s.rconn.Write(s.lconn.RawInput.data)
+	n, err := s.lconn.WritePeak(s.rconn)
 	if err != nil {
 		s.Log.Errorf("Write failed '%s'\n", err)
 		return
 	}
+
+	s.Log.WithField("len", n).Debug("client handshake written to server")
 
 	smsg, err := s.rconn.peakHandshake()
 	if err != nil {
@@ -132,35 +134,41 @@ func (s *Session) Start() {
 		return
 	}
 
-	_, err = s.lconn.Write(s.rconn.RawInput.data)
+	n, err = s.rconn.WritePeak(s.lconn)
 	if err != nil {
 		s.Log.Errorf("Write failed '%s'\n", err)
 		return
 	}
 
-	s.Log.Debugf("serverHello ocspStapling '%v'\n", serverHello.ocspStapling)
+	s.Log.WithField("len", n).Debug("server handshake written to client")
 
-	//
-	// cmsg, err := s.rconn.readHandshake()
-	// if err != nil {
-	// 	s.Log.WithError(err).Error("read handshake failed")
-	// 	return
-	// }
-	//
-	// certificate, ok := cmsg.(*certificateMsg)
-	//
-	// if !ok {
-	// 	s.Log.Errorf("certificate expected")
-	// 	return
-	// }
-	//
-	// _, err = s.lconn.Write(s.rconn.RawInput.data)
-	// if err != nil {
-	// 	s.Log.Errorf("Write failed '%s'\n", err)
-	// 	return
-	// }
-	//
-	// s.Log.Debugf("certificates count '%v'\n", len(certificate.certificates))
+	s.Log.Debugf("serverHello sessionId '%+v'\n", serverHello.sessionId)
+
+	if !bytes.Equal(clientHello.sessionID, serverHello.sessionId) {
+
+		cmsg, err := s.rconn.peakHandshake()
+		if err != nil {
+			s.Log.WithError(err).Error("read handshake failed")
+			return
+		}
+
+		switch t := cmsg.(type) {
+		default:
+			s.Log.Errorf("unexpected type")
+			return
+		case *certificateMsg:
+			s.Log.Debugf("certificates count '%v'\n", len(t.certificates))
+		}
+
+		n, err = s.rconn.WritePeak(s.lconn)
+		if err != nil {
+			s.Log.Errorf("Write failed '%s'\n", err)
+			return
+		}
+
+		s.Log.WithField("len", n).Debug("server certificates written to client")
+
+	}
 
 	s.wait.Add(2)
 

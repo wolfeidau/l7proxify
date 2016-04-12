@@ -895,6 +895,43 @@ func (m *certificateMsg) unmarshal(data []byte) bool {
 	return true
 }
 
+type finishedMsg struct {
+	raw        []byte
+	verifyData []byte
+}
+
+func (m *finishedMsg) equal(i interface{}) bool {
+	m1, ok := i.(*finishedMsg)
+	if !ok {
+		return false
+	}
+
+	return bytes.Equal(m.raw, m1.raw) &&
+		bytes.Equal(m.verifyData, m1.verifyData)
+}
+
+func (m *finishedMsg) marshal() (x []byte) {
+	if m.raw != nil {
+		return m.raw
+	}
+
+	x = make([]byte, 4+len(m.verifyData))
+	x[0] = typeFinished
+	x[3] = byte(len(m.verifyData))
+	copy(x[4:], m.verifyData)
+	m.raw = x
+	return
+}
+
+func (m *finishedMsg) unmarshal(data []byte) bool {
+	m.raw = data
+	if len(data) < 4 {
+		return false
+	}
+	m.verifyData = data[4:]
+	return true
+}
+
 func eqUint16s(x, y []uint16) bool {
 	if len(x) != len(y) {
 		return false

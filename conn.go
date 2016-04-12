@@ -15,7 +15,7 @@ type Conn struct {
 
 	Log log.Interface
 
-	RawInput *block
+	rawInput bytes.Buffer
 	hand     bytes.Buffer // handshake data waiting to be read
 
 }
@@ -37,7 +37,7 @@ func (c *Conn) peakHandshake() (interface{}, error) {
 
 	data := c.hand.Bytes()
 
-	c.Log.WithField("data", fmt.Sprintf("%x", data)).Debug("handshake")
+	//c.Log.WithField("data", fmt.Sprintf("%x", data)).Debug("handshake")
 
 	n := int(data[1])<<16 | int(data[2])<<8 | int(data[3])
 	if n > maxHandshake {
@@ -53,6 +53,8 @@ func (c *Conn) peakHandshake() (interface{}, error) {
 		m = new(serverHelloMsg)
 	case typeCertificate:
 		m = new(certificateMsg)
+	case typeFinished:
+		m = new(finishedMsg)
 	default:
 		return nil, fmt.Errorf("unexpected message type %d", data[0])
 	}
@@ -74,19 +76,16 @@ func (c *Conn) peakRecord(want recordType) error {
 		err error
 	)
 
-	if c.RawInput == nil {
-		c.RawInput = newBlock()
-	}
-	b := c.RawInput
+	data := make([]byte, recordHeaderLen)
 
-	if err = b.readFromUntil(c, recordHeaderLen); err != nil {
+	if _, err = io.ReadAtLeast(c, data, recordHeaderLen); err != nil {
 		c.Log.WithError(err).Error("header peek failed")
 		return err
 	}
 
-	c.Log.WithField("data", fmt.Sprintf("%x", b.data)).Debug("header")
+	c.Log.WithField("data", fmt.Sprintf("%x", data)).Debug("header")
 
-	typ := recordType(b.data[0])
+	typ := recordType(data[0])
 
 	// No valid TLS record has a type of 0x80, however SSLv2 handshakes
 	// start with a uint16 length where the MSB is set and the first record
@@ -96,8 +95,8 @@ func (c *Conn) peakRecord(want recordType) error {
 		return fmt.Errorf("tls: unsupported SSLv2 handshake received")
 	}
 
-	vers := uint16(b.data[1])<<8 | uint16(b.data[2])
-	n := int(b.data[3])<<8 | int(b.data[4])
+	vers := uint16(data[1])<<8 | uint16(data[2])
+	n := int(data[3])<<8 | int(data[4])
 
 	if n > maxCiphertext {
 		return fmt.Errorf("tls: oversized record received with length %d", n)
@@ -109,13 +108,19 @@ func (c *Conn) peakRecord(want recordType) error {
 		"n":    n,
 	}).Info("record")
 
-	if err = b.readFromUntil(c, n); err != nil {
+	c.rawInput.Write(data)
+
+	record := make([]byte, n)
+
+	if _, err = io.ReadAtLeast(c, record, n); err != nil {
 		if err == io.EOF {
 			err = io.ErrUnexpectedEOF
 		}
 		c.Log.WithError(err).Error("record peek failed")
 		return err
 	}
+
+	c.rawInput.Write(record)
 
 	switch typ {
 	default:
@@ -124,8 +129,20 @@ func (c *Conn) peakRecord(want recordType) error {
 		if typ != want {
 			return fmt.Errorf("tls: wanted record type %d got %d", want, typ)
 		}
-		c.hand.Write(b.data[recordHeaderLen:])
+		c.hand.Write(record)
 	}
 
 	return nil
+}
+
+// WritePeak write the current peak buffer to the supplied writer
+// and reset the peack buffers.
+func (c *Conn) WritePeak(w io.Writer) (int, error) {
+	data := c.rawInput.Bytes()
+	c.rawInput.Reset()
+	c.hand.Reset()
+
+	c.Log.WithField("len", len(data)).Debug("write peak")
+
+	return w.Write(data)
 }
