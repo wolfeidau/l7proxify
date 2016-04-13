@@ -16,8 +16,6 @@ type Conn struct {
 	Log log.Interface
 
 	rawInput bytes.Buffer
-	hand     bytes.Buffer // handshake data waiting to be read
-
 }
 
 // NewConn new l7proxify connection
@@ -29,22 +27,20 @@ func NewConn(conn *net.TCPConn) *Conn {
 }
 
 func (c *Conn) peakHandshake() (interface{}, error) {
-	for c.hand.Len() < 4 {
+	for c.rawInput.Len() < 4 {
 		if err := c.peakRecord(recordTypeHandshake); err != nil {
 			return nil, err
 		}
 	}
 
-	data := c.hand.Bytes()
-
-	//c.Log.WithField("data", fmt.Sprintf("%x", data)).Debug("handshake")
+	// build a slice minus the record header
+	data := c.rawInput.Bytes()[recordHeaderLen:]
 
 	n := int(data[1])<<16 | int(data[2])<<8 | int(data[3])
 	if n > maxHandshake {
 		return nil, fmt.Errorf("tls: oversized handshake with length %d", n)
 	}
 
-	data = c.hand.Next(4 + n)
 	var m handshakeMessage
 	switch data[0] {
 	case typeClientHello:
@@ -64,8 +60,6 @@ func (c *Conn) peakHandshake() (interface{}, error) {
 	if !m.unmarshal(data) {
 		return nil, fmt.Errorf("unexpected message type %d", data[0])
 	}
-
-	//s.Log.Infof("msg unmarshalled: %+v", m)
 
 	return m, nil
 }
@@ -120,8 +114,6 @@ func (c *Conn) peakRecord(want recordType) error {
 		return err
 	}
 
-	c.rawInput.Write(record)
-
 	switch typ {
 	default:
 		return fmt.Errorf("tls: unexpected record type")
@@ -129,7 +121,7 @@ func (c *Conn) peakRecord(want recordType) error {
 		if typ != want {
 			return fmt.Errorf("tls: wanted record type %d got %d", want, typ)
 		}
-		c.hand.Write(record)
+		c.rawInput.Write(record)
 	}
 
 	return nil
@@ -138,9 +130,9 @@ func (c *Conn) peakRecord(want recordType) error {
 // WritePeak write the current peak buffer to the supplied writer
 // and reset the peack buffers.
 func (c *Conn) WritePeak(w io.Writer) (int, error) {
+
 	data := c.rawInput.Bytes()
 	c.rawInput.Reset()
-	c.hand.Reset()
 
 	c.Log.WithField("len", len(data)).Debug("write peak")
 

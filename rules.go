@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"regexp"
 
+	"github.com/apex/log"
 	"github.com/mitchellh/mapstructure"
 )
 
@@ -64,6 +65,8 @@ func LoadRuleset(rules map[string]interface{}) error {
 		}
 
 		ruleset = append(ruleset, r)
+
+		log.WithField("rule", r).Debug("parsed rule")
 	}
 
 	return nil

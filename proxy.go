@@ -7,6 +7,7 @@ package l7proxify
 import (
 	"bytes"
 	"crypto/rand"
+	"crypto/x509"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -22,6 +23,9 @@ type Session struct {
 	laddr, raddr       net.Addr
 	lconn, rconn       *Conn
 	Log                log.Interface
+
+	certs          []*x509.Certificate
+	verifiedChains [][]*x509.Certificate
 
 	wait sync.WaitGroup
 }
@@ -65,8 +69,6 @@ func (s *Session) Start() {
 		s.Log.Errorf("clientHello expected")
 		return
 	}
-
-	s.Log.Debugf("clientHello sessionID'%+v'\n", clientHello.sessionID)
 
 	if clientHello.serverName == "" {
 		s.Log.Errorf("clientHello missing serverName")
@@ -113,13 +115,15 @@ func (s *Session) Start() {
 
 	defer s.rconn.Close()
 
+	s.Log.WithField("sessionId", clientHello.sessionID).Debug("clientHello")
+
 	n, err := s.lconn.WritePeak(s.rconn)
 	if err != nil {
 		s.Log.Errorf("Write failed '%s'\n", err)
 		return
 	}
 
-	s.Log.WithField("len", n).Debug("client handshake written to server")
+	s.Log.WithField("len", n).Debug("clientHello written to server")
 
 	smsg, err := s.rconn.peakHandshake()
 	if err != nil {
@@ -134,16 +138,18 @@ func (s *Session) Start() {
 		return
 	}
 
+	s.Log.WithField("sessionId", serverHello.sessionId).Debug("serverHello")
+
 	n, err = s.rconn.WritePeak(s.lconn)
 	if err != nil {
 		s.Log.Errorf("Write failed '%s'\n", err)
 		return
 	}
 
-	s.Log.WithField("len", n).Debug("server handshake written to client")
+	s.Log.WithField("len", n).Debug("serverHello written to client")
 
-	s.Log.Debugf("serverHello sessionId '%+v'\n", serverHello.sessionId)
-
+	// if the session identifiers don't match then we should expect the server to
+	// return a certificate message which we need to validate
 	if !bytes.Equal(clientHello.sessionID, serverHello.sessionId) {
 
 		cmsg, err := s.rconn.peakHandshake()
@@ -151,13 +157,18 @@ func (s *Session) Start() {
 			s.Log.WithError(err).Error("read handshake failed")
 			return
 		}
+		certs, ok := cmsg.(*certificateMsg)
 
-		switch t := cmsg.(type) {
-		default:
-			s.Log.Errorf("unexpected type")
+		if !ok {
+			s.Log.Errorf("certificate expected")
 			return
-		case *certificateMsg:
-			s.Log.Debugf("certificates count '%v'\n", len(t.certificates))
+		}
+
+		err = s.validateCerts(certs.certificates)
+
+		if err != nil {
+			s.Log.WithError(err).Errorf("certificate validation failed")
+			return
 		}
 
 		n, err = s.rconn.WritePeak(s.lconn)
@@ -167,7 +178,6 @@ func (s *Session) Start() {
 		}
 
 		s.Log.WithField("len", n).Debug("server certificates written to client")
-
 	}
 
 	s.wait.Add(2)
@@ -191,6 +201,51 @@ func (s *Session) pipe(to, from net.Conn, bytesCopied *int64) {
 	if err != nil {
 		s.Log.WithError(err).Error("pipe failed")
 	}
+}
+
+func (s *Session) validateCerts(certificates [][]byte) error {
+
+	var (
+		err  error
+		cert *x509.Certificate
+	)
+
+	for _, asn1Data := range certificates {
+
+		cert, err = x509.ParseCertificate(asn1Data)
+		if err != nil {
+			return err
+		}
+		s.Log.Debug("cert parsed")
+		s.Log.WithFields(log.Fields{
+			"CommonName":   cert.Subject.CommonName,
+			"Issuer":       cert.Issuer.Organization,
+			"SerialNumber": cert.Subject.SerialNumber,
+		}).Debug("cert parsed")
+
+		s.certs = append(s.certs, cert)
+
+	}
+
+	opts := x509.VerifyOptions{
+		Intermediates: x509.NewCertPool(),
+	}
+
+	for i, cert := range s.certs {
+		if i == 0 {
+			continue
+		}
+		opts.Intermediates.AddCert(cert)
+	}
+
+	s.verifiedChains, err = s.certs[0].Verify(opts)
+	if err != nil {
+		return err
+	}
+
+	s.Log.Debug("cert chain verified")
+
+	return nil
 }
 
 // TLSHandler pulls apart and proxies TLS connections using the client hello
